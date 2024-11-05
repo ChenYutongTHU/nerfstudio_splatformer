@@ -59,14 +59,19 @@ class NerfstudioDataParserConfig(DataParserConfig):
     """The method to use to center the poses."""
     auto_scale_poses: bool = True
     """Whether to automatically scale the poses to fit in +/- 1 bounding box."""
-    eval_mode: Literal["fraction", "filename", "interval", "all"] = "fraction"
+    eval_mode: Literal["fraction", "filename", "interval", "all", "eval-frame-index"] = "fraction"
     """
     The method to use for splitting the dataset into train and eval.
     Fraction splits based on a percentage for train and the remaining for eval.
     Filename splits based on filenames containing train/eval.
     Interval uses every nth frame for eval.
     All uses all the images for any split.
+    Eval-frame-index used for nerfbuster
     """
+    train_frame_indices: Tuple[int, ...] = (0,)
+    """From Nerfbuster"""
+    eval_frame_indices: Tuple[int, ...] = (1,)
+    """From Nerfbuster"""
     train_split_fraction: float = 0.9
     """The percentage of the dataset to use for training. Only used when eval_mode is train-split-fraction."""
     eval_interval: int = 8
@@ -217,6 +222,31 @@ class Nerfstudio(DataParser):
                     "[yellow] Be careful with '--eval-mode=all'. If using camera optimization, the cameras may diverge in the current implementation, giving unpredictable results."
                 )
                 i_train, i_eval = get_train_eval_split_all(image_filenames)
+            elif self.config.eval_mode == "eval-frame-index": #From nerfbuster
+                # keep around some metadata
+                eval_frame_index_0_metadata = []
+                # filter image_filenames and poses based on train and eval frame indices
+                num_images = len(image_filenames)
+                import os
+                basenames = [os.path.basename(image_filename) for image_filename in image_filenames]
+                i_all = np.arange(num_images)
+                i_train = []
+                i_eval = []
+                for idx, basename in zip(i_all, basenames):
+                    # check the frame index
+                    if len(basename.split("_")) == 2:
+                        frame_index = 0
+                    else:
+                        frame_index = int(basename.split("_")[1])
+                    if frame_index in self.config.train_frame_indices:
+                        i_train.append(idx)
+                        if frame_index == 0:
+                            # set 1 where frame_index is 0
+                            eval_frame_index_0_metadata.append(1)
+                        else:
+                            eval_frame_index_0_metadata.append(0)
+                    if frame_index in self.config.eval_frame_indices:
+                        i_eval.append(idx)
             else:
                 raise ValueError(f"Unknown eval mode {self.config.eval_mode}")
 
@@ -343,6 +373,8 @@ class Nerfstudio(DataParser):
         metadata = {}
 
         # _generate_dataparser_outputs might be called more than once so we check if we already loaded the point cloud
+        # Hard coded here
+        self.prompted_user = True
         try:
             self.prompted_user
         except AttributeError:
@@ -361,6 +393,11 @@ class Nerfstudio(DataParser):
                     self.create_pc = Confirm.ask(
                         "load_3D_points is true, but the dataset was processed with an outdated ns-process-data that didn't convert colmap points to .ply! Update the colmap dataset automatically?"
                     )
+                else:
+                    CONSOLE.print(
+                        "[bold yellow]Warning: load_3D_points set to true but no point cloud found. splatfacto will update the dataset with a point cloud."
+                    )
+                    self.create_pc = True
 
                 if self.create_pc:
                     import json

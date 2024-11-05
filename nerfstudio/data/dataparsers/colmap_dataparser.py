@@ -94,12 +94,16 @@ class ColmapDataParserConfig(DataParserConfig):
     """Path to masks directory. If not set, masks are not loaded."""
     depths_path: Optional[Path] = None
     """Path to depth maps directory. If not set, depths are not loaded."""
-    colmap_path: Path = Path("colmap/sparse/0")
+    colmap_path: Path = Path("sparse/0")
     """Path to the colmap reconstruction directory relative to the data path."""
     load_3D_points: bool = True
     """Whether to load the 3D points from the colmap reconstruction. This is helpful for Gaussian splatting and
     generally unused otherwise, but it's typically harmless so we default to True."""
+    load_bbox: bool = False
+    pcd_file_name: str = "points3D"
+    num_points_from_bbox: int = 50000
     max_2D_matches_per_3D_point: int = 0
+    sort_images_by_name: bool = True
     """Maximum number of 2D matches per 3D point. If set to -1, all 2D matches are loaded. If set to 0, no 2D matches are loaded."""
 
 
@@ -116,7 +120,6 @@ class ColmapDataParser(DataParser):
     The dataparser loads the downscaled images from folders with `_{downscale_factor}` suffix.
     If these folders do not exist, the user can choose to automatically downscale the images and
     create these folders.
-
     The loader is compatible with the datasets processed using the ns-process-data script and
     can be used as a drop-in replacement. It further supports datasets like Mip-NeRF 360 (although
     in the case of Mip-NeRF 360 the downsampled images may have a different resolution because they
@@ -150,7 +153,10 @@ class ColmapDataParser(DataParser):
 
         # Parse frames
         # we want to sort all images based on im_id
-        ordered_im_id = sorted(im_id_to_image.keys())
+        if self.config.sort_images_by_name:
+            ordered_im_id = sorted(im_id_to_image.keys(),key=lambda x: im_id_to_image[x].name)
+        else:
+            ordered_im_id = sorted(im_id_to_image.keys())
         for im_id in ordered_im_id:
             im_data = im_id_to_image[im_id]
             # NB: COLMAP uses Eigen / scalar-first quaternions
@@ -392,34 +398,71 @@ class ColmapDataParser(DataParser):
         return dataparser_outputs
 
     def _load_3D_points(self, colmap_path: Path, transform_matrix: torch.Tensor, scale_factor: float):
-        if (colmap_path / "points3D.bin").exists():
-            colmap_points = colmap_utils.read_points3D_binary(colmap_path / "points3D.bin")
-        elif (colmap_path / "points3D.txt").exists():
-            colmap_points = colmap_utils.read_points3D_text(colmap_path / "points3D.txt")
-        else:
-            raise ValueError(f"Could not find points3D.txt or points3D.bin in {colmap_path}")
-        points3D = torch.from_numpy(np.array([p.xyz for p in colmap_points.values()], dtype=np.float32))
-        points3D = (
-            torch.cat(
-                (
-                    points3D,
-                    torch.ones_like(points3D[..., :1]),
-                ),
-                -1,
+        if self.config.load_bbox:
+            assert (colmap_path / "bbox.txt").exists(), f"Could not find bbox.txt in {colmap_path}"
+            with open(colmap_path / "bbox.txt", "r") as f:
+                # bbox_min[0] bbox_min[1] bbox_min[2] \n bbox_max[0] bbox_max[1] bbox_max[2]
+                bbox = f.read().splitlines()
+                x_min, y_min, z_min = map(float, bbox[0].split())
+                x_max, y_max, z_max = map(float, bbox[1].split())
+            # Now sample points uniformly from the bbox
+            points3D_num_points = self.config.num_points_from_bbox
+            xs = np.random.uniform(x_min, x_max, points3D_num_points)
+            ys = np.random.uniform(y_min, y_max, points3D_num_points)
+            zs = np.random.uniform(z_min, z_max, points3D_num_points)
+            points3D = torch.from_numpy(np.stack([xs, ys, zs], axis=1)).float() #N,3
+            points3D_rgb = np.full((points3D_num_points, 3), 128, dtype=np.uint8)
+            points3D_error = np.full(points3D_num_points, 0.0, dtype=np.float32)
+            points3D = (
+                torch.cat(
+                    (
+                        points3D,
+                        torch.ones_like(points3D[..., :1]),
+                    ),
+                    -1,
+                )
+                @ transform_matrix.T
             )
-            @ transform_matrix.T
-        )
-        points3D *= scale_factor
+            points3D *= scale_factor
+            out = {
+                "points3D_xyz": points3D,
+                "points3D_rgb": torch.from_numpy(points3D_rgb),
+                "points3D_error": torch.from_numpy(points3D_error),
+                "points3D_num_points2D": points3D_num_points,
+            }
+        else:
+            pcd_file_name = self.config.pcd_file_name
+            if (colmap_path / f"{pcd_file_name}.bin").exists():
+                print(f"Reading 3D points from {colmap_path / f'{pcd_file_name}.bin'}")
+                colmap_points = colmap_utils.read_points3D_binary(colmap_path / f"{pcd_file_name}.bin")
+            elif (colmap_path / f"{pcd_file_name}.txt").exists():
+                print(f"Reading 3D points from {colmap_path / f'{pcd_file_name}.txt'}")
+                colmap_points = colmap_utils.read_points3D_text(colmap_path / f"{pcd_file_name}.txt")
+            else:
+                raise ValueError(f"Could not find {pcd_file_name}.txt or {pcd_file_name}.bin in {colmap_path}")
+            
+            points3D = torch.from_numpy(np.array([p.xyz for p in colmap_points.values()], dtype=np.float32))
+            points3D = (
+                torch.cat(
+                    (
+                        points3D,
+                        torch.ones_like(points3D[..., :1]),
+                    ),
+                    -1,
+                )
+                @ transform_matrix.T
+            )
+            points3D *= scale_factor
 
-        # Load point colours
-        points3D_rgb = torch.from_numpy(np.array([p.rgb for p in colmap_points.values()], dtype=np.uint8))
-        points3D_num_points = torch.tensor([len(p.image_ids) for p in colmap_points.values()], dtype=torch.int64)
-        out = {
-            "points3D_xyz": points3D,
-            "points3D_rgb": points3D_rgb,
-            "points3D_error": torch.from_numpy(np.array([p.error for p in colmap_points.values()], dtype=np.float32)),
-            "points3D_num_points2D": points3D_num_points,
-        }
+            # Load point colours
+            points3D_rgb = torch.from_numpy(np.array([p.rgb for p in colmap_points.values()], dtype=np.uint8))
+            points3D_num_points = torch.tensor([len(p.image_ids) for p in colmap_points.values()], dtype=torch.int64)
+            out = {
+                "points3D_xyz": points3D,
+                "points3D_rgb": points3D_rgb,
+                "points3D_error": torch.from_numpy(np.array([p.error for p in colmap_points.values()], dtype=np.float32)),
+                "points3D_num_points2D": points3D_num_points,
+            }
         if self.config.max_2D_matches_per_3D_point != 0:
             if (colmap_path / "images.txt").exists():
                 im_id_to_image = colmap_utils.read_images_text(colmap_path / "images.txt")

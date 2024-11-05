@@ -28,10 +28,10 @@ from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
 from typing import Dict, ForwardRef, Generic, List, Literal, Optional, Tuple, Type, Union, cast, get_args, get_origin
-
+import pickle
 import cv2
 import numpy as np
-import torch
+import torch, os
 from rich.progress import track
 from torch.nn import Parameter
 from typing_extensions import assert_never
@@ -45,7 +45,8 @@ from nerfstudio.data.dataparsers.nerfstudio_dataparser import NerfstudioDataPars
 from nerfstudio.data.datasets.base_dataset import InputDataset
 from nerfstudio.utils.misc import get_orig_class
 from nerfstudio.utils.rich_utils import CONSOLE
-
+from nerfstudio.utils import writer
+from nerfstudio.data.utils import colmap_parsing_utils
 
 @dataclass
 class FullImageDatamanagerConfig(DataManagerConfig):
@@ -68,6 +69,7 @@ class FullImageDatamanagerConfig(DataManagerConfig):
     """The image type returned from manager, caching images in uint8 saves memory"""
     max_thread_workers: Optional[int] = None
     """The maximum number of threads to use for caching images. If None, uses all available threads."""
+    save_train_gt: bool = False
 
 
 class FullImageDatamanager(DataManager, Generic[TDataset]):
@@ -128,6 +130,30 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
         assert len(self.train_unseen_cameras) > 0, "No data found in dataset"
 
         super().__init__()
+        # self.save_camera()
+
+    def save_camera(self): #This should be run after undistortion
+        fx = self.train_dataset.cameras.fx[0,0] #Immutable!
+        fy = self.train_dataset.cameras.fy[0,0]
+        cx = self.train_dataset.cameras.cx[0,0]
+        cy = self.train_dataset.cameras.cy[0,0] #The same for each scene
+        width = self.train_dataset.cameras.width[0,0]
+        height = self.train_dataset.cameras.height[0,0]
+        camera_to_worlds = self.train_dataset.cameras.camera_to_worlds
+        cameras = {
+            'train_camera_to_worlds': self.train_dataset.cameras.camera_to_worlds, 
+            'test_camera_to_worlds': self.eval_dataset.cameras.camera_to_worlds,
+            'fx': fx, 'fy': fy, 'cx': cx, 'cy': cy, 'width': width, 'height': height
+        }   
+        log_dir = writer.get_log_dir()
+        if log_dir is not None:
+            with open(os.path.join(log_dir, 'camera_for-3d-denoise.pkl'),'wb') as f:
+                pickle.dump(cameras,f)
+            CONSOLE.print(f"Camera params saved to {os.path.join(log_dir, 'camera_for-3d-denoise.pkl')}", style="bold green")
+            cameras_to_colmap = {1:colmap_parsing_utils.Camera(id=1, model='PINHOLE', width=width, height=height, params=[fx, fy, cx, cy])}
+            colmap_parsing_utils.write_cameras_binary(cameras_to_colmap, os.path.join(log_dir, 'undistorted_cameras.bin'))
+            # print(f"Camera params saved to {os.path.join(log_dir, 'undistorted_cameras.bin')}")
+
 
     @cached_property
     def cached_train(self) -> List[Dict[str, torch.Tensor]]:
@@ -160,6 +186,7 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
             K = camera.get_intrinsics_matrices().numpy()
             if camera.distortion_params is None:
                 return data
+            #CONSOLE.log(f"Undistorting image {idx}, distorting params: {camera.distortion_params}")
             distortion_params = camera.distortion_params.numpy()
             image = data["image"].numpy()
 
@@ -167,7 +194,6 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
             data["image"] = torch.from_numpy(image)
             if mask is not None:
                 data["mask"] = mask
-
             dataset.cameras.fx[idx] = float(K[0, 0])
             dataset.cameras.fy[idx] = float(K[1, 1])
             dataset.cameras.cx[idx] = float(K[0, 2])
@@ -189,7 +215,6 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
                     total=len(dataset),
                 )
             )
-
         # Move to device.
         if cache_images_device == "gpu":
             for cache in undistorted_images:
@@ -203,7 +228,6 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
                     cache["mask"] = cache["mask"].pin_memory()
         else:
             assert_never(cache_images_device)
-
         return undistorted_images
 
     def create_train_dataset(self) -> TDataset:
@@ -290,6 +314,17 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
             self.train_unseen_cameras = [i for i in range(len(self.train_dataset))]
 
         data = deepcopy(self.cached_train[image_idx])
+        if step==1:
+            self.save_camera()
+            import os
+            from nerfstudio.utils import writer
+            log_dir = writer.get_log_dir()
+            if log_dir is not None and self.config.save_train_gt:
+                os.makedirs(os.path.join(log_dir, 'renderings/train/images/gt'), exist_ok=True)
+                for i, img in enumerate(self.cached_train):
+                    img_path = os.path.join(log_dir, 'renderings/train/images/gt', f'img_{i:04d}.png')
+                    cv2.imwrite(img_path, img['image'][:,:,[2,1,0]].cpu().numpy())
+
         data["image"] = data["image"].to(self.device)
 
         assert len(self.train_dataset.cameras.shape) == 1, "Assumes single batch dimension"

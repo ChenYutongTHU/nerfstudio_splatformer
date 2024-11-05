@@ -60,7 +60,7 @@ def get_train_eval_split_filename(image_filenames: List) -> Tuple[np.ndarray, np
         # check the frame index
         if "train" in basename:
             i_train.append(idx)
-        elif "eval" in basename:
+        elif "eval" in basename or "test" in basename:
             i_eval.append(idx)
         else:
             raise ValueError("frame should contain train/eval in its name to use this eval-frame-index eval mode")

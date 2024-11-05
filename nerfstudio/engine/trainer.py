@@ -66,12 +66,22 @@ class TrainerConfig(ExperimentConfig):
     """Number of steps between eval all images."""
     max_num_iterations: int = 1000000
     """Maximum number of iterations to run."""
+    early_stop_steps: int = -1
+    """Number of steps to run before stopping training."""
+    save_last_checkpoint: bool = True
+    """Whether to save the last checkpoint."""
+    save_only_gs_params: bool = False
+    """Only save gs params"""
+    alpha_dir: str = "alpha"
+    """Directory to save alpha"""
     mixed_precision: bool = False
     """Whether or not to use mixed precision for training."""
     use_grad_scaler: bool = False
     """Use gradient scaler even if the automatic mixed precision is disabled."""
     save_only_latest_checkpoint: bool = True
     """Whether to only save the latest checkpoint or all checkpoints."""
+    test_after_train: bool = False
+    """Whether to run eval after training."""
     # optional parameters if we want to resume training
     load_dir: Optional[Path] = None
     """Optionally specify a pre-trained model directory to load from."""
@@ -150,6 +160,17 @@ class Trainer:
                 'test': loads train/test datasets into memory
                 'inference': does not load any dataset into memory
         """
+        # set up writers/profilers if enabled [Put it earlier so that dataparser can obtain the log_dir]
+        writer_log_path = self.base_dir / self.config.logging.relative_log_dir
+        writer.setup_event_writer(
+            self.config.is_wandb_enabled(),
+            self.config.is_tensorboard_enabled(),
+            self.config.is_comet_enabled(),
+            log_dir=writer_log_path,
+            experiment_name=self.config.experiment_name,
+            project_name=self.config.project_name,
+        )
+
         self.pipeline = self.config.pipeline.setup(
             device=self.device,
             test_mode=test_mode,
@@ -199,16 +220,6 @@ class Trainer:
             )
         )
 
-        # set up writers/profilers if enabled
-        writer_log_path = self.base_dir / self.config.logging.relative_log_dir
-        writer.setup_event_writer(
-            self.config.is_wandb_enabled(),
-            self.config.is_tensorboard_enabled(),
-            self.config.is_comet_enabled(),
-            log_dir=writer_log_path,
-            experiment_name=self.config.experiment_name,
-            project_name=self.config.project_name,
-        )
         writer.setup_local_writer(
             self.config.logging, max_iter=self.config.max_num_iterations, banner_messages=banner_messages
         )
@@ -297,10 +308,12 @@ class Trainer:
                 if self.pipeline.datamanager.eval_dataset:
                     self.eval_iteration(step)
 
-                if step_check(step, self.config.steps_per_save):
+                if step_check(step, self.config.steps_per_save) and self.config.save_last_checkpoint:
                     self.save_checkpoint(step)
-
                 writer.write_out_storage()
+                if self.config.early_stop_steps >0 and step > self.config.early_stop_steps:
+                    self._after_train()
+                    return
 
         # save checkpoint at the end of training, and write out any remaining events
         self._after_train()
@@ -319,7 +332,13 @@ class Trainer:
         """Function to run after training is complete"""
         self.training_state = "completed"  # used to update the webui state
         # save checkpoint at the end of training
-        self.save_checkpoint(self.step)
+        if self.config.save_last_checkpoint:
+            self.save_checkpoint(self.step)
+        if self.config.test_after_train:
+            output_path = os.path.join(writer.get_log_dir(), "renderings", "test", "images")
+            metrics_dict = self.pipeline.get_average_eval_image_metrics(
+                output_path=Path(output_path),
+                get_std=True)
         # write out any remaining events (e.g., total train time)
         writer.write_out_storage()
         table = Table(
@@ -435,13 +454,19 @@ class Trainer:
         elif load_checkpoint is not None:
             assert load_checkpoint.exists(), f"Checkpoint {load_checkpoint} does not exist"
             loaded_state = torch.load(load_checkpoint, map_location="cpu")
-            self._start_step = loaded_state["step"] + 1
-            # load the checkpoints for pipeline, optimizers, and gradient scalar
-            self.pipeline.load_pipeline(loaded_state["pipeline"], loaded_state["step"])
-            self.optimizers.load_optimizers(loaded_state["optimizers"])
-            if "schedulers" in loaded_state and self.config.load_scheduler:
-                self.optimizers.load_schedulers(loaded_state["schedulers"])
-            self.grad_scaler.load_state_dict(loaded_state["scalers"])
+            if self.config.save_only_gs_params:
+                #Assume the loaded checkpoint is only gs params
+                self._start_step = 0
+                self.pipeline.model.load_state_dict({k.replace('_model.',''):v for k,v in loaded_state.items()}, strict=False)
+                self.optimizers = self.setup_optimizers()
+            else:
+                self._start_step = loaded_state.get("step",-1) + 1
+                # load the checkpoints for pipeline, optimizers, and gradient scalar
+                self.pipeline.load_pipeline(loaded_state["pipeline"], loaded_state["step"])
+                self.optimizers.load_optimizers(loaded_state["optimizers"])
+                if "schedulers" in loaded_state and self.config.load_scheduler:
+                    self.optimizers.load_schedulers(loaded_state["schedulers"])
+                self.grad_scaler.load_state_dict(loaded_state["scalers"])
             CONSOLE.print(f"Done loading Nerfstudio checkpoint from {load_checkpoint}")
         else:
             CONSOLE.print("No Nerfstudio checkpoint to load, so training from scratch.")
@@ -458,18 +483,25 @@ class Trainer:
             self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
         # save the checkpoint
         ckpt_path: Path = self.checkpoint_dir / f"step-{step:09d}.ckpt"
-        torch.save(
-            {
-                "step": step,
-                "pipeline": self.pipeline.module.state_dict()  # type: ignore
-                if hasattr(self.pipeline, "module")
-                else self.pipeline.state_dict(),
-                "optimizers": {k: v.state_dict() for (k, v) in self.optimizers.optimizers.items()},
-                "schedulers": {k: v.state_dict() for (k, v) in self.optimizers.schedulers.items()},
-                "scalers": self.grad_scaler.state_dict(),
-            },
-            ckpt_path,
-        )
+        if self.config.save_only_gs_params:
+            state_dict = self.pipeline.module.state_dict() if hasattr(self.pipeline, "module") else self.pipeline.state_dict()
+            torch.save(
+                {k:v for k,v in state_dict.items() if "gauss_params" in k},
+                ckpt_path,
+            )
+        else:
+            torch.save(
+                {
+                    "step": step,
+                    "pipeline": self.pipeline.module.state_dict()  # type: ignore
+                    if hasattr(self.pipeline, "module")
+                    else self.pipeline.state_dict(),
+                    "optimizers": {k: v.state_dict() for (k, v) in self.optimizers.optimizers.items()},
+                    "schedulers": {k: v.state_dict() for (k, v) in self.optimizers.schedulers.items()},
+                    "scalers": self.grad_scaler.state_dict(),
+                },
+                ckpt_path,
+            )
         # possibly delete old checkpoints
         if self.config.save_only_latest_checkpoint:
             # delete everything else in the checkpoint folder
@@ -502,7 +534,6 @@ class Trainer:
             if step % self.gradient_accumulation_steps[group] == self.gradient_accumulation_steps[group] - 1
         ]
         self.optimizers.optimizer_scaler_step_some(self.grad_scaler, needs_step)
-
         if self.config.log_gradients:
             total_grad = 0
             for tag, value in self.pipeline.model.named_parameters():
@@ -519,7 +550,6 @@ class Trainer:
         # If the gradient scaler is decreased, no optimization step is performed so we should not step the scheduler.
         if scale <= self.grad_scaler.get_scale():
             self.optimizers.scheduler_step_all(step)
-
         # Merging loss and metrics dict into a single output.
         return loss, loss_dict, metrics_dict  # type: ignore
 

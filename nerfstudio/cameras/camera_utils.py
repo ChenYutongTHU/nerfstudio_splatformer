@@ -457,13 +457,13 @@ def rotation_matrix_between(a: Float[Tensor, "3"], b: Float[Tensor, "3"]) -> Flo
     """
     a = a / torch.linalg.norm(a)
     b = b / torch.linalg.norm(b)
-    v = torch.linalg.cross(a, b)  # Axis of rotation.
+    v = torch.cross(a, b)  # Axis of rotation.
 
     # Handle cases where `a` and `b` are parallel.
     eps = 1e-6
     if torch.sum(torch.abs(v)) < eps:
         x = torch.tensor([1.0, 0, 0]) if abs(a[0]) < eps else torch.tensor([0, 1.0, 0])
-        v = torch.linalg.cross(a, x)
+        v = torch.cross(a, x)
 
     v = v / torch.linalg.norm(v)
     skew_sym_mat = torch.Tensor(
@@ -569,15 +569,21 @@ def auto_orient_and_center_poses(
     if method == "pca":
         _, eigvec = torch.linalg.eigh(translation_diff.T @ translation_diff)
         eigvec = torch.flip(eigvec, dims=(-1,))
-
         if torch.linalg.det(eigvec) < 0:
-            eigvec[:, 2] = -eigvec[:, 2]
+            eigvec[:, 2] = -eigvec[:, 2] #preserve orientation, right-handed coordinate system
 
         transform = torch.cat([eigvec, eigvec @ -translation[..., None]], dim=-1)
         oriented_poses = transform @ poses
 
         if oriented_poses.mean(dim=0)[2, 1] < 0:
-            oriented_poses[:, 1:3] = -1 * oriented_poses[:, 1:3]
+            #oriented_poses[:, 1:3] = -1 * oriented_poses[:, 1:3]
+            # We flip y and z axes of the world frame  (left multiply the poses)
+            transform_plus = torch.eye(3)
+            transform_plus[1, 1] = -1
+            transform_plus[2, 2] = -1
+            oriented_poses = transform_plus @ oriented_poses
+            transform = transform_plus @ transform
+
     elif method in ("up", "vertical"):
         up = torch.mean(poses[:, :3, 1], dim=0)
         up = up / torch.linalg.norm(up)
@@ -779,7 +785,8 @@ def fisheye624_unproject_helper(uv, params, max_iters: int = 5):
         uv_dist_est[:, :, 0] = uv_dist_est[:, :, 0] + (s0 * rd_sq + s1 * rd_4)
         uv_dist_est[:, :, 1] = uv_dist_est[:, :, 1] + (s2 * rd_sq + s3 * rd_4)
         # Compute the derivative of uv_dist w.r.t. xr_yr.
-        duv_dist_dxr_yr = uv.new_ones(B, N, 2, 2)
+        #duv_dist_dxr_yr = uv.new_ones(B, N, 2, 2)
+        duv_dist_dxr_yr = torch.ones(B, N, 2, 2, device=uv.device, dtype=uv.dtype)
         duv_dist_dxr_yr[:, :, 0, 0] = 1.0 + 6.0 * xr_yr[:, :, 0] * p0 + 2.0 * xr_yr[:, :, 1] * p1
         offdiag = 2.0 * (xr_yr[:, :, 0] * p1 + xr_yr[:, :, 1] * p0)
         duv_dist_dxr_yr[:, :, 0, 1] = offdiag
@@ -822,8 +829,10 @@ def fisheye624_unproject_helper(uv, params, max_iters: int = 5):
     xr_yr_norm = xr_yr.norm(p=2, dim=2).reshape(B, N, 1)
     th = xr_yr_norm.clone()
     for _ in range(max_iters):
-        th_radial = uv.new_ones(B, N, 1)
-        dthd_th = uv.new_ones(B, N, 1)
+        #th_radial = uv.new_ones(B, N, 1)
+        th_radial = torch.ones(B, N, 1, device=uv.device, dtype=uv.dtype)
+        #dthd_th = uv.new_ones(B, N, 1)
+        dthd_th = torch.ones(B, N, 1, device=uv.device, dtype=uv.dtype)
         for k in range(6):
             r_k = params[:, -12 + k].reshape(B, 1, 1)
             th_radial = th_radial + (r_k * torch.pow(th, 2 + k * 2))
@@ -836,7 +845,8 @@ def fisheye624_unproject_helper(uv, params, max_iters: int = 5):
     # Compute the ray direction using theta and xr_yr.
     close_to_zero = torch.logical_and(th.abs() < eps, xr_yr_norm.abs() < eps)
     ray_dir = torch.where(close_to_zero, xr_yr, torch.tan(th) / xr_yr_norm * xr_yr)
-    ray = torch.cat([ray_dir, uv.new_ones(B, N, 1)], dim=2)
+    #ray = torch.cat([ray_dir, uv.new_ones(B, N, 1)], dim=2)
+    ray = torch.cat([ray_dir, torch.ones(B, N, 1, device=uv.device, dtype=uv.dtype)], dim=2)
     return ray
 
 

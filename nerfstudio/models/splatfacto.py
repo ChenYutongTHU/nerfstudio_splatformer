@@ -671,6 +671,8 @@ class SplatfactoModel(Model):
 
             if renderers.BACKGROUND_COLOR_OVERRIDE is not None:
                 background = renderers.BACKGROUND_COLOR_OVERRIDE.to(self.device)
+            elif self.config.background_color == "random": # Use Black background to render
+                background = torch.zeros(3, device=self.device)
             else:
                 background = self.background_color.to(self.device)
 

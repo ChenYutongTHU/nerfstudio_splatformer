@@ -18,12 +18,14 @@ Abstracts for the Pipeline class.
 from __future__ import annotations
 
 import typing
+import os
+import numpy as np
 from abc import abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 from time import time
 from typing import Any, Dict, List, Literal, Mapping, Optional, Tuple, Type, Union, cast
-
+from PIL import Image
 import torch
 import torch.distributed as dist
 import torchvision.utils as vutils
@@ -219,6 +221,8 @@ class VanillaPipelineConfig(InstantiateConfig):
     """specifies the datamanager config"""
     model: ModelConfig = field(default_factory=ModelConfig)
     """specifies the model config"""
+    save_name: str = "name" #"idx"
+    save_img: bool = False
 
 
 class VanillaPipeline(Pipeline):
@@ -364,6 +368,8 @@ class VanillaPipeline(Pipeline):
         num_images = len(self.datamanager.fixed_indices_eval_dataloader)
         if output_path is not None:
             output_path.mkdir(exist_ok=True, parents=True)
+            os.makedirs(output_path / f"gt", exist_ok=True)
+            os.makedirs(output_path / f"pred", exist_ok=True)
         with Progress(
             TextColumn("[progress.description]{task.description}"),
             BarColumn(),
@@ -382,8 +388,22 @@ class VanillaPipeline(Pipeline):
                 metrics_dict, image_dict = self.model.get_image_metrics_and_images(outputs, batch)
                 if output_path is not None:
                     for key in image_dict.keys():
+                        if not key in ['img']:
+                            continue
                         image = image_dict[key]  # [H, W, C] order
-                        vutils.save_image(image.permute(2, 0, 1).cpu(), output_path / f"eval_{key}_{idx:04d}.png")
+                        H, Wx2, C = image.shape
+                        gt = image[:, : Wx2 // 2, :]
+                        gt = torch.clamp(gt, 0, 1)
+                        pred = image[:, Wx2 // 2 :, :]
+                        pred = torch.clamp(pred, 0, 1)
+                        if self.config.save_name == 'idx':
+                            name = f"{idx:04d}"
+                        elif self.config.save_name == 'name':
+                            name = os.path.basename(batch['image_filename']).split('.')[0]
+                        if self.config.save_img:
+                            vutils.save_image(pred.permute(2, 0, 1).cpu(), output_path / f"pred/{name}.png")
+                            vutils.save_image(gt.permute(2, 0, 1).cpu(), output_path / f"gt/{name}.png")
+
 
                 assert "num_rays_per_sec" not in metrics_dict
                 metrics_dict["num_rays_per_sec"] = (num_rays / (time() - inner_start)).item()
@@ -408,7 +428,7 @@ class VanillaPipeline(Pipeline):
                 )
         self.train()
         return metrics_dict
-
+    
     def load_pipeline(self, loaded_state: Dict[str, Any], step: int) -> None:
         """Load the checkpoint from the given path
 

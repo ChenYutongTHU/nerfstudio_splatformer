@@ -54,7 +54,7 @@ class InputDataset(Dataset):
         self.cameras = deepcopy(dataparser_outputs.cameras)
         self.cameras.rescale_output_resolution(scaling_factor=scale_factor)
         self.mask_color = dataparser_outputs.metadata.get("mask_color", None)
-
+        
     def __len__(self):
         return len(self._dataparser_outputs.image_filenames)
 
@@ -110,7 +110,7 @@ class InputDataset(Dataset):
         return image
 
     def get_data(self, image_idx: int, image_type: Literal["uint8", "float32"] = "float32") -> Dict:
-        """Returns the ImageDataset data as a dictionary.
+        """Returns the ImageDataset data as a dictionary
 
         Args:
             image_idx: The image index in the dataset.
@@ -123,7 +123,7 @@ class InputDataset(Dataset):
         else:
             raise NotImplementedError(f"image_type (={image_type}) getter was not implemented, use uint8 or float32")
 
-        data = {"image_idx": image_idx, "image": image}
+        data = {"image_idx": image_idx, "image": image, "image_filename": str(self._dataparser_outputs.image_filenames[image_idx])}
         if self._dataparser_outputs.mask_filenames is not None:
             mask_filepath = self._dataparser_outputs.mask_filenames[image_idx]
             data["mask"] = get_image_mask_tensor_from_path(filepath=mask_filepath, scale_factor=self.scale_factor)

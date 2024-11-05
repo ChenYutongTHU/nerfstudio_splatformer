@@ -42,6 +42,7 @@ def to8b(x):
 
 EVENT_WRITERS = []
 EVENT_STORAGE = []
+LOG_DIR = []
 GLOBAL_BUFFER = {}
 
 
@@ -66,6 +67,11 @@ class EventType(enum.Enum):
     DICT = "write_scalar_dict"
     CONFIG = "write_config"
 
+def get_log_dir():
+    if LOG_DIR == []:
+        return None
+    else:
+        return LOG_DIR[0]
 
 @check_main_thread
 def put_image(name, image: Float[Tensor, "H W C"], step: int):
@@ -214,7 +220,7 @@ def setup_event_writer(
         banner_messages: list of messages to always display at bottom of screen
     """
     using_event_writer = False
-
+    LOG_DIR.append(log_dir)
     if is_comet_enabled:
         curr_writer = CometWriter(log_dir=log_dir, experiment_name=experiment_name, project_name=project_name)
         EVENT_WRITERS.append(curr_writer)
@@ -306,7 +312,7 @@ class WandbWriter(Writer):
 
     def __init__(self, log_dir: Path, experiment_name: str, project_name: str = "nerfstudio-project"):
         import wandb  # wandb is slow to import, so we only import it if we need it.
-
+        self.log_dir = log_dir
         wandb.init(
             project=os.environ.get("WANDB_PROJECT", project_name),
             dir=os.environ.get("WANDB_DIR", str(log_dir)),
@@ -342,7 +348,7 @@ class TensorboardWriter(Writer):
 
     def __init__(self, log_dir: Path):
         self.tb_writer = SummaryWriter(log_dir=log_dir)
-
+        self.log_dir = log_dir
     def write_image(self, name: str, image: Float[Tensor, "H W C"], step: int) -> None:
         image = to8b(image)
         self.tb_writer.add_image(name, image, step, dataformats="HWC")
@@ -370,7 +376,7 @@ class CometWriter(Writer):
         self.experiment = comet_ml.Experiment(project_name=project_name)
         if experiment_name != "unnamed":
             self.experiment.set_name(experiment_name)
-
+        self.log_dir = log_dir
     def write_image(self, name: str, image: Float[Tensor, "H W C"], step: int) -> None:
         self.experiment.log_image(image, name, step=step)
 

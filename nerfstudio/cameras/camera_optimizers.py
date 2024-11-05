@@ -145,13 +145,13 @@ class CameraOptimizer(nn.Module):
             return torch.eye(4, device=self.device)[None, :3, :4].tile(indices.shape[0], 1, 1)
         return functools.reduce(pose_utils.multiply, outputs)
 
-    def apply_to_raybundle(self, raybundle: RayBundle) -> None:
+    def apply_to_raybundle(self, raybundle: RayBundle) -> RayBundle | None:
         """Apply the pose correction to the raybundle"""
         if self.config.mode != "off":
             correction_matrices = self(raybundle.camera_indices.squeeze())  # type: ignore
             raybundle.origins = raybundle.origins + correction_matrices[:, :3, 3]
             raybundle.directions = torch.bmm(correction_matrices[:, :3, :3], raybundle.directions[..., None]).squeeze()
-
+            return raybundle
     def apply_to_camera(self, camera: Cameras) -> torch.Tensor:
         """Apply the pose correction to the world-to-camera matrix in a Camera object"""
         if self.config.mode == "off":
