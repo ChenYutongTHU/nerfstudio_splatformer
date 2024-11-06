@@ -150,8 +150,8 @@ class FullImageDatamanager(DataManager, Generic[TDataset]):
             with open(os.path.join(log_dir, 'camera_for-3d-denoise.pkl'),'wb') as f:
                 pickle.dump(cameras,f)
             CONSOLE.print(f"Camera params saved to {os.path.join(log_dir, 'camera_for-3d-denoise.pkl')}", style="bold green")
-            cameras_to_colmap = {1:colmap_parsing_utils.Camera(id=1, model='PINHOLE', width=width, height=height, params=[fx, fy, cx, cy])}
-            colmap_parsing_utils.write_cameras_binary(cameras_to_colmap, os.path.join(log_dir, 'undistorted_cameras.bin'))
+            # cameras_to_colmap = {1:colmap_parsing_utils.Camera(id=1, model='PINHOLE', width=width, height=height, params=[fx, fy, cx, cy])}
+            # colmap_parsing_utils.write_cameras_binary(cameras_to_colmap, os.path.join(log_dir, 'undistorted_cameras.bin'))
             # print(f"Camera params saved to {os.path.join(log_dir, 'undistorted_cameras.bin')}")
 
 
