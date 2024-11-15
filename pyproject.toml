@@ -19,11 +19,11 @@ dependencies = [
     "appdirs>=1.4",
     "rawpy>=0.18.1; platform_machine != 'arm64'",
     "newrawpy>=1.0.0b0; platform_machine == 'arm64'",
-    matplotlib>=3.6.0,
-    pathos,
-    pytorch-msssim,
-    splines==0.3.0,
-    torchmetrics[image]>=1.0.1
+    "matplotlib>=3.6.0",
+    "pathos",
+    "pytorch-msssim",
+    "splines==0.3.0",
+    "torchmetrics[image]>=1.0.1"
 
 ]
 
